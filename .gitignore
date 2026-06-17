@@ -1,0 +1,41 @@
+# Data — never commit (invariant 8)
+dataset/
+
+# Secrets
+.env
+
+# MLflow tracking + artifacts
+mlruns/
+mlartifacts/
+*.db
+
+# Generated reports/figures
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code (local agent settings + working-agreement context)
+.claude/
+CLAUDE.md

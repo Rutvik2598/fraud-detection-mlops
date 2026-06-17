@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fraud-detection-mlops"
+version = "0.1.0"
+description = "Real-time fraud detection MLOps pipeline (IEEE-CIS) — streaming inference, train/serve parity, feedback loop, drift-triggered retraining."
+readme = "README.md"
+# CLAUDE.md targets Python 3.11; the local machine runs 3.13. We pin >=3.11 and
+# develop on 3.13. Docker (later milestones) will pin 3.11 for parity.
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# M0 dependencies only. Streaming/serving/feature-store deps are added in their
+# own milestones (M2+), never scaffolded early. Exact versions are frozen in
+# requirements.txt for reproducibility (invariant 7).
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "scikit-learn>=1.5",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mlflow>=2.15",
+    "jupyter>=1.0",
+    "nbconvert>=7.16",
+    "ipykernel>=6.29",
+    "ruff>=0.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
