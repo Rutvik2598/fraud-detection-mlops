@@ -2,7 +2,7 @@
 
 Real-time fraud detection MLOps pipeline on the IEEE-CIS dataset — streaming inference, train/serve feature parity, a delayed-label feedback loop, and drift-triggered retraining.
 
-**Status:** M0 — scaffold ✅ · M1 — offline model ✅ · M2 — streaming backbone ✅ · M3 — feature store + online inference ✅ · _next: M4 (feedback loop + retraining)_
+**Status:** M0 — scaffold ✅ · M1 — offline model ✅ · M2 — streaming ✅ · M3 — feature store + serving ✅ · M4 — feedback loop + retraining ✅ · _next: M5 (monitoring + drift)_
 
 ## Quickstart
 
@@ -80,3 +80,22 @@ For local dev without Docker, set `FEAST_ONLINE_STORE=sqlite`.
 **Train/serve parity:** `make score-verify` materializes state at the cutoff, then for the first "live" transaction of each card compares online vs offline — **300 transactions, all 12 velocity features and all calibrated model scores matched exactly**. `tests/test_serving_parity.py` guards the Feast on-demand transform without a broker.
 
 **Latency (server-side processing, the scoring budget):** warm per-request **p50 ≈ 14 ms, p99 ≈ 28 ms** — under the 50 ms budget (Feast lookup ~1.4 ms, model ~13 ms). Under concurrent load the single-worker GIL serializes the CPU-bound model call, so throughput scales with workers/replicas; the sqlite dev store also adds tail latency under contention that Redis removes. Measured with `make loadtest`; re-run against Redis for production numbers.
+
+## M4 — feedback loop + retraining
+
+Labels (chargebacks) arrive **late**: a transaction at `TransactionDT = t` only gets a usable label once the clock passes `t + LABEL_DELAY_SECONDS`. A Prefect flow retrains on the matured labels (joined back by `TransactionID`) and promotes the challenger in the MLflow registry **only if it beats the current champion** on the fixed held-out validation window.
+
+```bash
+make feedback-demo                 # simulate the clock advancing: retrain rounds + gated promotion + label trace
+make retrain CLOCK=8745782         # run one Prefect retraining round at a given clock
+```
+
+Demo output (3 rounds, label delay 7 days; validation window held out every round):
+
+| round | clock (TransactionDT) | matured labels | challenger PR-AUC | champion PR-AUC | promoted |
+|---|---|---|---|---|---|
+| 1 | 5,592,303 | 214,078 | 0.4103 | — | ✅ |
+| 2 | 8,745,782 | 331,489 | 0.4352 | 0.4103 | ✅ |
+| 3 | 12,192,853 | 453,779 | 0.4529 | 0.4352 | ✅ |
+
+PR-AUC climbs as delayed labels mature, each round gated-promoted because it genuinely beat the incumbent (the gate rejects regressions — covered by `tests/test_feedback.py`). The demo then traces one late fraud label from "not yet arrived → excluded" to "matured → joined back → trained on → part of a promoted model." Point-in-time features are computed once and cached; the retraining flow only uses labels matured by the clock (never the future — invariant 1/2). The demo registers under a separate model name (`fraud-detection-feedback`) so it never disturbs the M3 serving champion.

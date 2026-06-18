@@ -30,9 +30,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mlflow
-import numpy as np
 import pandas as pd
-from sklearn.pipeline import Pipeline
 from xgboost import XGBClassifier
 
 from fraud_detection_mlops import config
@@ -41,14 +39,9 @@ from fraud_detection_mlops.data import (
     time_based_split_three,
     validate_training_data,
 )
-from fraud_detection_mlops.features import (
-    add_velocity_features,
-    build_preprocessor,
-    select_model_columns,
-)
+from fraud_detection_mlops.features import add_velocity_features
 from fraud_detection_mlops.models import (
     brier,
-    calibrate_classifier,
     evaluate_scores,
     operating_point,
     plot_calibration_curve,
@@ -56,6 +49,7 @@ from fraud_detection_mlops.models import (
     plot_pr_curve,
     select_cost_threshold,
 )
+from fraud_detection_mlops.models.offline import XGB_PARAMS, fit_calibrated_model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("train_offline")
@@ -63,20 +57,6 @@ logger = logging.getLogger("train_offline")
 # The M0 logistic-regression floor on the identical validation window. M1 must
 # clearly beat this. (Reproduce with `python -m ...models.train_baseline`.)
 M0_PR_AUC = 0.1839
-
-XGB_PARAMS = dict(
-    n_estimators=500,
-    max_depth=6,
-    learning_rate=0.03,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_lambda=1.0,
-    min_child_weight=5,
-    objective="binary:logistic",
-    eval_metric="aucpr",
-    tree_method="hist",
-    n_jobs=-1,
-)
 
 
 def _feature_importance(preprocessor, booster: XGBClassifier, k: int = 20) -> pd.DataFrame:
@@ -109,43 +89,24 @@ def main() -> dict[str, float]:
     train_df, calib_df, val_df = time_based_split_three(df)
     del df
 
-    # 3. Model columns + preprocessing fit on TRAIN ONLY (no val/calib leakage).
-    numeric, categorical = select_model_columns(train_df)
-    model_cols = numeric + categorical
-    preprocess = build_preprocessor(numeric, categorical)
+    # 3-5. Fit preprocessing + XGBoost (scale_pos_weight) + isotonic calibration,
+    #      all via the shared fitter so M1 and the M4 retraining flow are identical.
+    fit = fit_calibrated_model(train_df, calib_df, seed=config.RANDOM_SEED)
+    inference = fit["pipeline"]
+    booster = fit["booster"]
+    preprocess = fit["preprocess"]
+    model_cols = fit["model_cols"]
+    numeric, categorical = fit["numeric"], fit["categorical"]
+    scale_pos_weight = fit["scale_pos_weight"]
 
-    X_train, y_train = train_df[model_cols], train_df[config.TARGET].to_numpy()
-    X_calib, y_calib = calib_df[model_cols], calib_df[config.TARGET].to_numpy()
-    X_val, y_val = val_df[model_cols], val_df[config.TARGET].to_numpy()
+    y_val = val_df[config.TARGET].to_numpy()
     amt_calib = calib_df[config.AMOUNT_COL].to_numpy()
     amt_val = val_df[config.AMOUNT_COL].to_numpy()
 
-    Xtr = preprocess.fit_transform(X_train, y_train)
-    Xcal = preprocess.transform(X_calib)
-    Xval = preprocess.transform(X_val)
-
-    # 4. Imbalance via scale_pos_weight = (#neg / #pos) on TRAIN (invariant 6).
-    n_pos = int(y_train.sum())
-    n_neg = int(len(y_train) - n_pos)
-    scale_pos_weight = n_neg / n_pos
-    logger.info("Train pos=%d neg=%d -> scale_pos_weight=%.2f", n_pos, n_neg, scale_pos_weight)
-
-    booster = XGBClassifier(
-        **XGB_PARAMS, scale_pos_weight=scale_pos_weight, random_state=config.RANDOM_SEED
-    )
-    logger.info("Fitting XGBoost on %d train rows...", len(X_train))
-    booster.fit(Xtr, y_train)
-
-    # 5. Calibrate probabilities on the CALIBRATION slice (invariant 4).
-    calibrated = calibrate_classifier(booster, Xcal, y_calib, method="isotonic")
-    inference = Pipeline([("preprocess", preprocess), ("calibrated", calibrated)])
-
     # 6. Score validation (uncalibrated for the calibration comparison; calibrated
-    #    for everything reported). Verify the assembled pipeline == manual path.
-    val_scores_uncal = booster.predict_proba(Xval)[:, 1]
-    val_scores = calibrated.predict_proba(Xval)[:, 1]
-    pipe_scores = inference.predict_proba(X_val)[:, 1]
-    assert np.allclose(val_scores, pipe_scores), "Inference pipeline diverges from manual scoring!"
+    #    for everything reported).
+    val_scores_uncal = booster.predict_proba(preprocess.transform(val_df[model_cols]))[:, 1]
+    val_scores = inference.predict_proba(val_df[model_cols])[:, 1]
 
     # 7. Honest evaluation on validation (PR-AUC headline; no accuracy).
     metrics = evaluate_scores(y_val, val_scores)
@@ -155,7 +116,8 @@ def main() -> dict[str, float]:
     metrics["pr_auc_lift_over_m0"] = metrics["pr_auc"] - M0_PR_AUC
 
     # 8. Cost-based threshold: select on CALIBRATION (calibrated scores), apply to VAL.
-    calib_scores = calibrated.predict_proba(Xcal)[:, 1]
+    y_calib = calib_df[config.TARGET].to_numpy()
+    calib_scores = inference.predict_proba(calib_df[model_cols])[:, 1]
     thr = select_cost_threshold(y_calib, calib_scores, amt_calib)
     op = operating_point(y_val, val_scores, amt_val, thr["threshold"])
     metrics["chosen_threshold"] = thr["threshold"]
@@ -225,14 +187,14 @@ def main() -> dict[str, float]:
             mlflow.log_artifact(str(p), artifact_path="figures")
         mlflow.log_artifact(str(imp_csv), artifact_path="reports")
 
-        signature = mlflow.models.infer_signature(X_val.head(50), val_scores[:50])
+        signature = mlflow.models.infer_signature(val_df[model_cols].head(50), val_scores[:50])
         # cloudpickle: the pipeline wraps a custom transformer + XGBoost, which
         # MLflow's default skops serializer rejects as "untrusted types".
         mlflow.sklearn.log_model(
             inference,
             name="model",
             signature=signature,
-            input_example=X_val.head(5),
+            input_example=val_df[model_cols].head(5),
             registered_model_name=config.REGISTERED_MODEL_NAME,
             serialization_format="cloudpickle",
         )

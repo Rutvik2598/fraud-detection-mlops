@@ -12,6 +12,9 @@ mlartifacts/
 # Feast generated store (registry, online db, materialized snapshot) — invariant 8
 feature_repo/data/
 
+# Prefect local home (ephemeral server state)
+.prefect/
+
 # Generated reports/figures
 reports/
 

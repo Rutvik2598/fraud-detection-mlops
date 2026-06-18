@@ -21,7 +21,9 @@ license = { text = "MIT" }
 #   - confluent-kafka: the M2 streaming client (Kafka API, talks to Redpanda).
 #     Ships a bundled librdkafka wheel, so no system build step.
 #   - feast[redis]: the M3 feature store (online=Redis, offline=parquet).
-#   - fastapi/uvicorn: the M3 online scoring service.
+#   - fastapi/uvicorn: the M3 online scoring service. Pinned <0.130 because
+#     Prefect 3's embedded server (M4) breaks on FastAPI's 0.137 router API.
+#   - prefect: the M4 retraining orchestration.
 dependencies = [
     "pandas>=2.2",
     "numpy>=2.0",
@@ -31,9 +33,10 @@ dependencies = [
     "xgboost>=2.0",
     "confluent-kafka>=2.3",
     "feast[redis]>=0.40",
-    "fastapi>=0.115",
+    "fastapi>=0.115,<0.130",
     "uvicorn>=0.30",
     "requests>=2.31",
+    "prefect>=3.0,<4",
 ]
 
 [project.optional-dependencies]

@@ -174,3 +174,29 @@ DECISION_THRESHOLD: float = float(os.environ.get("DECISION_THRESHOLD", "0.08"))
 SERVING_HOST: str = os.environ.get("SERVING_HOST", "0.0.0.0")
 SERVING_PORT: int = int(os.environ.get("SERVING_PORT", "8001"))
 LATENCY_BUDGET_MS: float = float(os.environ.get("LATENCY_BUDGET_MS", "50"))
+
+# --- M4 feedback loop + retraining ---------------------------------------------
+# Label delay: a transaction's fraud label (chargeback) only becomes usable this
+# many TransactionDT-seconds after it occurred. Until then we cannot train on it.
+# 7 days — a realistic chargeback lag relative to the dataset's ~6-month span.
+LABEL_DELAY_SECONDS: int = int(os.environ.get("LABEL_DELAY_SECONDS", str(7 * 86400)))
+
+# The held-out validation window (latest VAL_FRACTION of the timeline) is the
+# fixed yardstick every retrain is judged on — never trained on (invariant 2).
+VAL_FRACTION: float = float(os.environ.get("VAL_FRACTION", "0.2"))
+
+# Retraining registers challengers here and promotes the champion alias. The demo
+# uses a model name separate from M3's production champion so it can show the full
+# arc (weak start -> improving) without disturbing the serving model.
+FEEDBACK_MODEL_NAME: str = os.environ.get("FEEDBACK_MODEL_NAME", "fraud-detection-feedback")
+MLFLOW_FEEDBACK_EXPERIMENT: str = os.environ.get("MLFLOW_FEEDBACK_EXPERIMENT", "fraud-feedback")
+# Gated promotion: a challenger is promoted only if its validation PR-AUC beats
+# the current champion's by at least this margin (>=0 prevents noisy regressions).
+PROMOTION_MARGIN: float = float(os.environ.get("PROMOTION_MARGIN", "0.0"))
+
+# Cached point-in-time feature frame (computed once, reused across retrain rounds).
+FEATURE_CACHE_PARQUET: Path = Path(
+    os.environ.get("FEATURE_CACHE_PARQUET", REPORTS_DIR / "feature_cache.parquet")
+)
+# Local Prefect home (ephemeral server state); gitignored.
+os.environ.setdefault("PREFECT_HOME", str(PROJECT_ROOT / ".prefect"))

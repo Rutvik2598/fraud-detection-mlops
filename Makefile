@@ -12,7 +12,8 @@ PORT ?= 8001
 .PHONY: help install test lint format \
         train-baseline train-offline \
         redpanda-up redpanda-down redpanda-logs topic produce consume stream-demo \
-        store-up feast-build serve score-verify loadtest
+        store-up feast-build serve score-verify loadtest \
+        feedback-demo retrain
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -74,3 +75,9 @@ score-verify: ## M3: prove train/serve parity (online features + scores == offli
 
 loadtest: ## M3: measure p50/p99 scoring latency under load
 	$(PY) -m fraud_detection_mlops.serving.loadtest -n 4000 -c $(WORKERS)
+
+feedback-demo: ## M4: simulate label delay -> retrain rounds -> gated promotion (full demo)
+	$(PY) -m fraud_detection_mlops.pipelines.demo_feedback
+
+retrain: ## M4: run one Prefect retraining round at CLOCK (TransactionDT)
+	$(PY) -m fraud_detection_mlops.pipelines.retrain_flow --clock $(CLOCK)
