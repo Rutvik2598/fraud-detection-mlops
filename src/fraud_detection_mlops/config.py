@@ -142,3 +142,35 @@ REPLAY_MAX_SLEEP_SECONDS: float = float(os.environ.get("REPLAY_MAX_SLEEP_SECONDS
 STREAM_FIELDS: tuple[str, ...] = (
     ID_COL, TIME_COL, AMOUNT_COL, "card1", NEW_LOCATION_COL, NEW_DEVICE_COL,
 )
+
+# --- M3 feature store (Feast) + online inference -------------------------------
+# Feast needs real timestamps, but TransactionDT is "seconds from a fixed
+# reference", not a wall-clock time. We map it to a synthetic datetime
+# (BASE + dt seconds) consistently everywhere, so event ordering is preserved.
+import datetime as _dt  # noqa: E402
+
+FEAST_BASE_DATETIME: _dt.datetime = _dt.datetime(2017, 12, 1, tzinfo=_dt.UTC)
+FEAST_REPO_PATH: Path = Path(os.environ.get("FEAST_REPO_PATH", PROJECT_ROOT / "feature_repo"))
+# The per-card state snapshot the online store serves (offline source = parquet).
+CARD_STATE_PARQUET: Path = Path(
+    os.environ.get("CARD_STATE_PARQUET", FEAST_REPO_PATH / "data" / "card_state.parquet")
+)
+# Online store backend: "redis" (docker-compose, the M3 target) or "sqlite"
+# (local/dev/test, no Docker needed). Selected by feature_store.yaml; this mirrors
+# the value so app code can log which store it is hitting.
+FEAST_ONLINE_STORE: str = os.environ.get("FEAST_ONLINE_STORE", "redis")
+REDIS_CONNECTION_STRING: str = os.environ.get("REDIS_CONNECTION_STRING", "localhost:6379")
+
+# Snapshot cutoff: state is built from transactions with TransactionDT <= this
+# quantile; later transactions are the "live" stream scored against that state.
+# Matches the M1 train/val boundary so the served state mirrors training.
+CARD_STATE_CUTOFF_FRACTION: float = float(os.environ.get("CARD_STATE_CUTOFF_FRACTION", "0.8"))
+
+# Decision threshold for allow/block, from M1's cost analysis. The serving app
+# prefers the value logged with the champion model; this is the fallback.
+DECISION_THRESHOLD: float = float(os.environ.get("DECISION_THRESHOLD", "0.08"))
+
+# FastAPI scoring service.
+SERVING_HOST: str = os.environ.get("SERVING_HOST", "0.0.0.0")
+SERVING_PORT: int = int(os.environ.get("SERVING_PORT", "8001"))
+LATENCY_BUDGET_MS: float = float(os.environ.get("LATENCY_BUDGET_MS", "50"))

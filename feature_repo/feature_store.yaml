@@ -1,0 +1,15 @@
+# Feast config for the `feast` CLI (feast apply / feast ui). The application code
+# builds an equivalent store programmatically (serving/store.py) so it can switch
+# the online store to sqlite for local/dev/test without Docker.
+#
+# Online = Redis (the M3 target, started via docker-compose).
+# Offline = parquet file source (see serving/feature_defs.py).
+project: fraud_detection
+provider: local
+registry: data/registry.db
+online_store:
+    type: redis
+    connection_string: localhost:6379
+offline_store:
+    type: file
+entity_key_serialization_version: 3

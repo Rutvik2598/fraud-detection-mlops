@@ -6,10 +6,13 @@ TOPIC ?= transactions
 PARTITIONS ?= 6
 LIMIT ?= 50000
 SPEED ?= 0
+WORKERS ?= 4
+PORT ?= 8001
 
 .PHONY: help install test lint format \
         train-baseline train-offline \
-        redpanda-up redpanda-down redpanda-logs topic produce consume stream-demo
+        redpanda-up redpanda-down redpanda-logs topic produce consume stream-demo \
+        store-up feast-build serve score-verify loadtest
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -55,3 +58,19 @@ consume: ## M2: consume + update rolling features (writes reports/stream_feature
 
 stream-demo: ## M2: end-to-end check — produce a slice, consume it, verify parity vs offline
 	$(PY) -m fraud_detection_mlops.streaming.verify --limit $(LIMIT) --topic $(TOPIC)
+
+store-up: ## M3: start Redis (the Feast online store)
+	docker compose up -d redis
+	@echo "Redis up on localhost:6379"
+
+feast-build: ## M3: build card-state snapshot, apply + materialize into the online store
+	$(PY) -m fraud_detection_mlops.serving.store
+
+serve: ## M3: run the FastAPI scoring service ($(WORKERS) workers on port $(PORT))
+	$(PY) -m uvicorn fraud_detection_mlops.serving.app:app --host 0.0.0.0 --port $(PORT) --workers $(WORKERS)
+
+score-verify: ## M3: prove train/serve parity (online features + scores == offline)
+	$(PY) -m fraud_detection_mlops.serving.verify_parity --sample 300
+
+loadtest: ## M3: measure p50/p99 scoring latency under load
+	$(PY) -m fraud_detection_mlops.serving.loadtest -n 4000 -c $(WORKERS)

@@ -43,5 +43,18 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:29092
 
+  # M3: Feast online store. Holds the latest per-card state for <50ms lookups.
+  redis:
+    image: redis:7.4-alpine
+    container_name: redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]  # cache-only, no disk persistence
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
 volumes:
   redpanda-data: {}

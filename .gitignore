@@ -9,6 +9,9 @@ mlruns/
 mlartifacts/
 *.db
 
+# Feast generated store (registry, online db, materialized snapshot) — invariant 8
+feature_repo/data/
+
 # Generated reports/figures
 reports/
 

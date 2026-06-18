@@ -20,6 +20,8 @@ license = { text = "MIT" }
 #     the heavy missingness in the C/D/V/identity blocks.
 #   - confluent-kafka: the M2 streaming client (Kafka API, talks to Redpanda).
 #     Ships a bundled librdkafka wheel, so no system build step.
+#   - feast[redis]: the M3 feature store (online=Redis, offline=parquet).
+#   - fastapi/uvicorn: the M3 online scoring service.
 dependencies = [
     "pandas>=2.2",
     "numpy>=2.0",
@@ -28,6 +30,10 @@ dependencies = [
     "matplotlib>=3.8",
     "xgboost>=2.0",
     "confluent-kafka>=2.3",
+    "feast[redis]>=0.40",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]

@@ -31,7 +31,7 @@ from collections.abc import Mapping
 from fraud_detection_mlops import config
 from fraud_detection_mlops.features.velocity import _NAN_TOKEN, VELOCITY_FEATURES
 
-__all__ = ["OnlineCardAggregator", "VELOCITY_FEATURES"]
+__all__ = ["OnlineCardAggregator", "VELOCITY_FEATURES", "compute_velocity_features", "card_key"]
 
 
 def _is_missing(value: object) -> bool:
@@ -39,6 +39,71 @@ def _is_missing(value: object) -> bool:
     if value is None:
         return True
     return isinstance(value, float) and math.isnan(value)
+
+
+def _new_flag(value: object, seen) -> float:
+    if _is_missing(value):
+        return math.nan  # missing region/device is "unknown", not "new"
+    return 0.0 if value in seen else 1.0
+
+
+def compute_velocity_features(
+    *,
+    dt: float,
+    amount: float,
+    location: object,
+    device: object,
+    last_dt: float | None,
+    lifetime_count: int,
+    lifetime_sum: float,
+    events,
+    seen_loc,
+    seen_dev,
+    windows: dict[str, int],
+) -> dict[str, float]:
+    """The ONE velocity-feature definition, shared by every code path.
+
+    Given the current transaction (``dt``/``amount``/``location``/``device``) and
+    the card's prior-state — lifetime count/sum, last transaction time, the recent
+    event window (an iterable of ``(dt, amount)`` pairs in time order), and the
+    sets of locations/devices already seen — return the 12 velocity features.
+
+    The streaming aggregator (M2 consumer), the offline parity check, and the
+    Feast on-demand feature view (M3 serving) all call this exact function, so
+    train and serve cannot drift (invariant 5). Windows are half-open ``[dt-W, dt)``
+    to exclude the current instant, matching the offline ``rolling(closed="left")``.
+    """
+    feats: dict[str, float] = {}
+    feats["card_txn_count_prior"] = float(lifetime_count)
+    feats["time_since_last_txn"] = float(dt - last_dt) if last_dt is not None else math.nan
+
+    if lifetime_count > 0:
+        prior_mean = lifetime_sum / lifetime_count
+        feats["card_amt_mean_prior"] = prior_mean
+        feats["amt_vs_card_mean_ratio"] = amount / prior_mean
+    else:
+        feats["card_amt_mean_prior"] = math.nan
+        feats["amt_vs_card_mean_ratio"] = math.nan
+
+    for name, width in windows.items():
+        lower = dt - width
+        count = 0
+        total = 0.0
+        # events are time-ordered; scan from the most recent backwards and stop
+        # once we fall before the window's lower bound.
+        for ev_dt, ev_amt in reversed(events):
+            if ev_dt >= dt:  # exclude the current instant (closed="left")
+                continue
+            if ev_dt < lower:  # left edge inclusive; earlier -> out of window
+                break
+            count += 1
+            total += ev_amt
+        feats[f"card_txn_count_{name}"] = float(count)
+        feats[f"card_amt_sum_{name}"] = float(total)
+
+    feats["new_location"] = _new_flag(location, seen_loc)
+    feats["new_device"] = _new_flag(device, seen_dev)
+    return feats
 
 
 def card_key(row: Mapping[str, object], card_cols: tuple[str, ...] = config.CARD_ID_COLS) -> str:
@@ -101,71 +166,43 @@ class OnlineCardAggregator:
     def n_cards(self) -> int:
         return len(self._state)
 
-    def update(self, row: Mapping[str, object]) -> dict[str, float]:
-        """Compute features for ``row`` (from prior txns), then fold it into state."""
+    def _state_for(self, row: Mapping[str, object]) -> _CardState:
         key = card_key(row, self.card_cols)
         state = self._state.get(key)
         if state is None:
             state = _CardState()
             self._state[key] = state
+        return state
 
+    def update(self, row: Mapping[str, object]) -> dict[str, float]:
+        """Compute features for ``row`` (from prior txns), then fold it into state."""
+        state = self._state_for(row)
         dt = float(row[self.time_col])
+        feats = compute_velocity_features(
+            dt=dt,
+            amount=float(row[self.amount_col]),
+            location=row.get(self.location_col),
+            device=row.get(self.device_col),
+            last_dt=state.last_dt,
+            lifetime_count=state.lifetime_count,
+            lifetime_sum=state.lifetime_sum,
+            events=state.events,
+            seen_loc=state.seen_loc,
+            seen_dev=state.seen_dev,
+            windows=self.windows,
+        )
+        self._advance(state, dt, row)
+        return feats
+
+    def ingest(self, row: Mapping[str, object]) -> None:
+        """Fold ``row`` into state WITHOUT computing features (fast snapshot build)."""
+        state = self._state_for(row)
+        self._advance(state, float(row[self.time_col]), row)
+
+    def _advance(self, state: _CardState, dt: float, row: Mapping[str, object]) -> None:
         amount = float(row[self.amount_col])
         location = row.get(self.location_col)
         device = row.get(self.device_col)
-
-        feats = self._compute(state, dt, amount, location, device)
-        self._advance(state, dt, amount, location, device)
-        return feats
-
-    def _compute(
-        self, state: _CardState, dt: float, amount: float, location: object, device: object
-    ) -> dict[str, float]:
-        prior_count = state.lifetime_count
-        feats: dict[str, float] = {}
-
-        feats["card_txn_count_prior"] = float(prior_count)
-        last = state.last_dt
-        feats["time_since_last_txn"] = float(dt - last) if last is not None else math.nan
-
-        if prior_count > 0:
-            prior_mean = state.lifetime_sum / prior_count
-            feats["card_amt_mean_prior"] = prior_mean
-            feats["amt_vs_card_mean_ratio"] = amount / prior_mean
-        else:
-            feats["card_amt_mean_prior"] = math.nan
-            feats["amt_vs_card_mean_ratio"] = math.nan
-
-        # Windowed counts/sums over [dt - W, dt): strictly-earlier txns only.
-        for name, width in self.windows.items():
-            lower = dt - width
-            count = 0
-            total = 0.0
-            # events are time-ordered; iterate from the most recent backwards and
-            # stop once we fall before the window's lower bound.
-            for ev_dt, ev_amt in reversed(state.events):
-                if ev_dt >= dt:  # exclude the current instant (closed="left")
-                    continue
-                if ev_dt < lower:  # left edge is inclusive; earlier -> out of window
-                    break
-                count += 1
-                total += ev_amt
-            feats[f"card_txn_count_{name}"] = float(count)
-            feats[f"card_amt_sum_{name}"] = float(total)
-
-        feats["new_location"] = self._new_flag(location, state.seen_loc)
-        feats["new_device"] = self._new_flag(device, state.seen_dev)
-        return feats
-
-    @staticmethod
-    def _new_flag(value: object, seen: set[object]) -> float:
-        if _is_missing(value):
-            return math.nan  # missing region/device is "unknown", not "new"
-        return 0.0 if value in seen else 1.0
-
-    def _advance(
-        self, state: _CardState, dt: float, amount: float, location: object, device: object
-    ) -> None:
         state.events.append((dt, amount))
         # Evict events older than the largest window relative to *this* txn; they
         # can never fall inside a window for this or any later (>= dt) txn.
@@ -179,3 +216,27 @@ class OnlineCardAggregator:
             state.seen_loc.add(location)
         if not _is_missing(device):
             state.seen_dev.add(device)
+
+    def snapshot(self) -> list[dict[str, object]]:
+        """Export each card's current state — the rows materialized into Feast.
+
+        One row per card holding the prior-state the velocity transform needs:
+        lifetime count/sum, last transaction time, the retained event window
+        (parallel ``event_dts``/``event_amts`` arrays), and the sets of locations
+        and devices seen so far. ``last_dt`` doubles as the snapshot's logical time.
+        """
+        rows: list[dict[str, object]] = []
+        for key, st in self._state.items():
+            rows.append(
+                {
+                    "card_id": key,
+                    "last_dt": int(st.last_dt) if st.last_dt is not None else 0,
+                    "lifetime_count": int(st.lifetime_count),
+                    "lifetime_sum": float(st.lifetime_sum),
+                    "event_dts": [int(d) for d, _ in st.events],
+                    "event_amts": [float(a) for _, a in st.events],
+                    "seen_loc": sorted(float(x) for x in st.seen_loc),
+                    "seen_dev": sorted(str(x) for x in st.seen_dev),
+                }
+            )
+        return rows

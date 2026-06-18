@@ -2,7 +2,7 @@
 
 Real-time fraud detection MLOps pipeline on the IEEE-CIS dataset — streaming inference, train/serve feature parity, a delayed-label feedback loop, and drift-triggered retraining.
 
-**Status:** M0 — scaffold ✅ · M1 — offline model ✅ · M2 — streaming backbone ✅ · _next: M3 (feature store + online inference)_
+**Status:** M0 — scaffold ✅ · M1 — offline model ✅ · M2 — streaming backbone ✅ · M3 — feature store + online inference ✅ · _next: M4 (feedback loop + retraining)_
 
 ## Quickstart
 
@@ -63,3 +63,20 @@ make consume                         # updates rolling features, writes reports/
 ```
 
 Messages are **keyed by card** so all of a card's transactions stay ordered on one partition — the guarantee the rolling aggregates depend on. The online aggregator (`features/online.py`) is the serve-side twin of the offline `features/velocity.py`; `tests/test_online_aggregator.py` replays data through both and asserts they produce **identical** features (incl. a 30k-row real-data slice and concurrent same-second transactions) — train/serve parity (invariant 5) verified without a broker. The transactions stream deliberately carries **no fraud label** (chargebacks arrive late; that's the M4 feedback loop).
+
+## M3 — feature store + online inference
+
+Feast (online = Redis, offline = parquet) serves the per-card rolling state; a FastAPI service looks features up by card key and scores with the calibrated champion model under the latency budget. The 12 velocity features are defined **once** (`features/online.py::compute_velocity_features`) and exposed as a Feast on-demand feature view — the same function the streaming aggregator uses, so offline (`get_historical_features`) and online (`get_online_features`) cannot drift.
+
+```bash
+docker compose up -d redis                              # online store
+make feast-build                                        # build snapshot + apply + materialize
+make serve                                              # FastAPI on :8001 (4 workers)
+make score-verify                                       # prove parity: online features + scores == offline
+make loadtest                                           # p50/p99 latency under load
+```
+For local dev without Docker, set `FEAST_ONLINE_STORE=sqlite`.
+
+**Train/serve parity:** `make score-verify` materializes state at the cutoff, then for the first "live" transaction of each card compares online vs offline — **300 transactions, all 12 velocity features and all calibrated model scores matched exactly**. `tests/test_serving_parity.py` guards the Feast on-demand transform without a broker.
+
+**Latency (server-side processing, the scoring budget):** warm per-request **p50 ≈ 14 ms, p99 ≈ 28 ms** — under the 50 ms budget (Feast lookup ~1.4 ms, model ~13 ms). Under concurrent load the single-worker GIL serializes the CPU-bound model call, so throughput scales with workers/replicas; the sqlite dev store also adds tail latency under contention that Redis removes. Measured with `make loadtest`; re-run against Redis for production numbers.
