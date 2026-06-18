@@ -18,6 +18,8 @@ license = { text = "MIT" }
 #   - xgboost: the M1 gradient-boosted model (CLAUDE.md tech stack). CPU-only is
 #     fine for tabular fraud; it also handles NaN natively, which matters given
 #     the heavy missingness in the C/D/V/identity blocks.
+#   - confluent-kafka: the M2 streaming client (Kafka API, talks to Redpanda).
+#     Ships a bundled librdkafka wheel, so no system build step.
 dependencies = [
     "pandas>=2.2",
     "numpy>=2.0",
@@ -25,6 +27,7 @@ dependencies = [
     "scikit-learn>=1.6",
     "matplotlib>=3.8",
     "xgboost>=2.0",
+    "confluent-kafka>=2.3",
 ]
 
 [project.optional-dependencies]

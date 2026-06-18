@@ -7,6 +7,7 @@ for train/serve parity (invariant 5).
 
 from fraud_detection_mlops.features.build import build_preprocessor, select_model_columns
 from fraud_detection_mlops.features.encoders import FrequencyEncoder
+from fraud_detection_mlops.features.online import OnlineCardAggregator
 from fraud_detection_mlops.features.velocity import VELOCITY_FEATURES, add_velocity_features
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "FrequencyEncoder",
     "select_model_columns",
     "build_preprocessor",
+    "OnlineCardAggregator",
 ]

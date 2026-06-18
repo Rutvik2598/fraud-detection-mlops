@@ -116,3 +116,29 @@ MLFLOW_EXPERIMENT: str = os.environ.get("MLFLOW_EXPERIMENT", "fraud-baseline")
 MLFLOW_OFFLINE_EXPERIMENT: str = os.environ.get("MLFLOW_OFFLINE_EXPERIMENT", "fraud-offline")
 REGISTERED_MODEL_NAME: str = os.environ.get("REGISTERED_MODEL_NAME", "fraud-detection-offline")
 CHAMPION_ALIAS: str = "champion"
+
+# --- M2 streaming (Redpanda / Kafka API) ---------------------------------------
+# Host-facing bootstrap server (Redpanda's EXTERNAL listener from docker-compose).
+# Inside the compose network, services use redpanda:29092 instead.
+REDPANDA_BOOTSTRAP: str = os.environ.get("REDPANDA_BOOTSTRAP", "localhost:19092")
+TRANSACTIONS_TOPIC: str = os.environ.get("TRANSACTIONS_TOPIC", "transactions")
+# Partition count for the transactions topic. Messages are keyed by card so all
+# of a card's transactions land on one partition and are consumed in arrival
+# order — the ordering guarantee the per-card rolling aggregates depend on.
+TRANSACTIONS_PARTITIONS: int = int(os.environ.get("TRANSACTIONS_PARTITIONS", "6"))
+FEATURE_CONSUMER_GROUP: str = os.environ.get("FEATURE_CONSUMER_GROUP", "fraud-feature-updater")
+
+# Replay speed: simulated TransactionDT-seconds per real wall-clock second.
+# 3600 => 1 hour of history replays per second. <= 0 means "as fast as possible"
+# (no inter-event sleep). A single sleep is capped to keep big idle gaps snappy.
+REPLAY_SPEED: float = float(os.environ.get("REPLAY_SPEED", "3600"))
+REPLAY_MAX_SLEEP_SECONDS: float = float(os.environ.get("REPLAY_MAX_SLEEP_SECONDS", "0.25"))
+
+# Fields carried on each transaction message. Deliberately NOT including isFraud:
+# in production a transaction does not arrive with its fraud label (chargebacks
+# come back days later), and M2 does no scoring or labelling. The delayed-label
+# stream is M4. This set is exactly what the online aggregator needs today; M3
+# will extend it (or move to feature lookup) for full model scoring.
+STREAM_FIELDS: tuple[str, ...] = (
+    ID_COL, TIME_COL, AMOUNT_COL, "card1", NEW_LOCATION_COL, NEW_DEVICE_COL,
+)

@@ -1,0 +1,47 @@
+# M2 streaming backbone: Redpanda (Kafka API) + Redpanda Console.
+# Brings up the broker the producer/consumer talk to. Streaming/serving apps are
+# run from the venv for now; they get dockerized as serving lands (M3+).
+#
+#   docker compose up -d            # start broker + console
+#   docker compose ps               # check health
+#   open http://localhost:8080      # Redpanda Console (topics, messages, lag)
+#
+# Versions are pinned for reproducibility (invariant 7).
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container          # single-node local defaults (smp=1, overprovisioned)
+      - --default-log-level=info
+      # Two listeners: PLAINTEXT for in-network clients (e.g. Console), EXTERNAL
+      # advertised as localhost:19092 for apps running on the host.
+      - --kafka-addr=PLAINTEXT://0.0.0.0:29092,EXTERNAL://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:29092,EXTERNAL://localhost:19092
+    ports:
+      - "19092:19092"   # external Kafka API (host apps connect here)
+      - "9644:9644"     # admin / metrics
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    container_name: redpanda-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+
+volumes:
+  redpanda-data: {}
