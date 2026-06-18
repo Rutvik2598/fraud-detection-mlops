@@ -12,15 +12,19 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
-# M0 dependencies only. Streaming/serving/feature-store deps are added in their
-# own milestones (M2+), never scaffolded early. Exact versions are frozen in
-# requirements.txt for reproducibility (invariant 7).
+# M0+M1 modeling dependencies. Streaming/serving/feature-store deps are added in
+# their own milestones (M2+), never scaffolded early. Exact versions are frozen
+# in requirements.txt for reproducibility (invariant 7).
+#   - xgboost: the M1 gradient-boosted model (CLAUDE.md tech stack). CPU-only is
+#     fine for tabular fraud; it also handles NaN natively, which matters given
+#     the heavy missingness in the C/D/V/identity blocks.
 dependencies = [
     "pandas>=2.2",
     "numpy>=2.0",
     "scipy>=1.13",
-    "scikit-learn>=1.5",
+    "scikit-learn>=1.6",
     "matplotlib>=3.8",
+    "xgboost>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +34,7 @@ dev = [
     "nbconvert>=7.16",
     "ipykernel>=6.29",
     "ruff>=0.6",
+    "pytest>=8.0",
 ]
 
 [tool.setuptools.packages.find]

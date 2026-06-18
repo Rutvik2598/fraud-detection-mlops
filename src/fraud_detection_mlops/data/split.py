@@ -73,3 +73,60 @@ def time_based_split(
     assert train_df[time_col].max() <= val_df[time_col].min(), "Time overlap across split!"
 
     return train_df, val_df
+
+
+def time_based_split_three(
+    df: pd.DataFrame,
+    *,
+    model_train_fraction: float = config.MODEL_TRAIN_FRACTION,
+    train_fraction: float = config.TRAIN_FRACTION,
+    time_col: str = config.TIME_COL,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split ``df`` into (train, calibration, validation) by time.
+
+    Two cuts on the ``time_col`` timeline produce three strictly-ordered windows:
+    the earliest ``model_train_fraction`` trains the model, the slice up to
+    ``train_fraction`` calibrates it (and selects the cost threshold), and the
+    final ``1 - train_fraction`` is held out for metrics. Because the validation
+    boundary equals the M0 two-way cut, the validation set is identical to M0's —
+    so M1's PR-AUC is comparable to the baseline on the exact same rows.
+
+    train < calibration < validation in time, so no future leaks backward
+    (invariant 2). Validation is touched only for final metrics, never for any
+    fitting or threshold selection.
+    """
+    if not 0.0 < model_train_fraction < train_fraction < 1.0:
+        raise ValueError(
+            "Need 0 < model_train_fraction < train_fraction < 1; got "
+            f"{model_train_fraction} and {train_fraction}."
+        )
+
+    ordered = df.sort_values([time_col, config.ID_COL]).reset_index(drop=True)
+    train_cut = ordered[time_col].quantile(model_train_fraction, interpolation="lower")
+    val_cut = ordered[time_col].quantile(train_fraction, interpolation="lower")
+
+    train_df = ordered[ordered[time_col] <= train_cut].copy()
+    calib_df = ordered[(ordered[time_col] > train_cut) & (ordered[time_col] <= val_cut)].copy()
+    val_df = ordered[ordered[time_col] > val_cut].copy()
+
+    if len(train_df) == 0 or len(calib_df) == 0 or len(val_df) == 0:
+        raise ValueError(
+            "Three-way time split produced an empty window — check the fractions "
+            f"and time distribution (train_cut={train_cut}, val_cut={val_cut})."
+        )
+
+    logger.info(
+        "3-way time split: train=%d (fraud %.3f%%) | calib=%d (fraud %.3f%%) | "
+        "val=%d (fraud %.3f%%)",
+        len(train_df),
+        100 * train_df[config.TARGET].mean(),
+        len(calib_df),
+        100 * calib_df[config.TARGET].mean(),
+        len(val_df),
+        100 * val_df[config.TARGET].mean(),
+    )
+
+    assert train_df[time_col].max() <= calib_df[time_col].min(), "train/calib time overlap!"
+    assert calib_df[time_col].max() <= val_df[time_col].min(), "calib/val time overlap!"
+
+    return train_df, calib_df, val_df
