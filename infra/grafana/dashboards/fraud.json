@@ -1,0 +1,130 @@
+{
+  "title": "Fraud detection — serving & drift",
+  "uid": "fraud-detection",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Scoring latency p50 / p99 (ms)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1000 * histogram_quantile(0.5, sum(rate(fraud_scoring_latency_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1000 * histogram_quantile(0.99, sum(rate(fraud_scoring_latency_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Throughput (req/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(fraud_scoring_requests_total[1m]))",
+          "legendFormat": "req/s"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Alert (block) rate",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(fraud_scoring_decisions_total{decision=\"block\"}[1m])) / clamp_min(sum(rate(fraud_scoring_decisions_total[1m])), 0.0001)",
+          "legendFormat": "block rate"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Score distribution p50 / p90 / p99",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum(rate(fraud_score_bucket[1m])) by (le))",
+          "legendFormat": "p50 score"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.9, sum(rate(fraud_score_bucket[1m])) by (le))",
+          "legendFormat": "p90 score"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(fraud_score_bucket[1m])) by (le))",
+          "legendFormat": "p99 score"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Feature drift share",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "red", "value": 0.3 }
+          ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "fraud_feature_drift_share" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Prediction drift",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "OK", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "DRIFT", "color": "red" } } }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "fraud_prediction_drift" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Drift-triggered retrains",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "fraud_drift_retrains_total" }
+      ]
+    }
+  ]
+}

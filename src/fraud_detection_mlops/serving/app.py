@@ -20,10 +20,12 @@ from contextlib import asynccontextmanager
 
 import mlflow
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from fraud_detection_mlops import config
 from fraud_detection_mlops.features.online import VELOCITY_FEATURES, card_key
+from fraud_detection_mlops.monitoring import metrics
 from fraud_detection_mlops.serving import store as store_mod
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -72,6 +74,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="fraud-detection online scoring", lifespan=lifespan)
 
 
+@app.get("/metrics")
+def prometheus_metrics() -> Response:
+    """Prometheus scrape endpoint (latency, throughput, decisions, score dist)."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -103,6 +111,7 @@ def score(txn: dict) -> dict:
     decision = "block" if prob >= threshold else "allow"
     t2 = time.perf_counter()
 
+    metrics.record_scoring(t2 - t0, prob, decision)
     return {
         "transaction_id": txn.get(config.ID_COL),
         "card_id": card_key(txn),

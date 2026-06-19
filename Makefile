@@ -13,7 +13,8 @@ PORT ?= 8001
         train-baseline train-offline \
         redpanda-up redpanda-down redpanda-logs topic produce consume stream-demo \
         store-up feast-build serve score-verify loadtest \
-        feedback-demo retrain
+        feedback-demo retrain \
+        monitoring-up drift-demo drift-monitor produce-drift
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -81,3 +82,17 @@ feedback-demo: ## M4: simulate label delay -> retrain rounds -> gated promotion 
 
 retrain: ## M4: run one Prefect retraining round at CLOCK (TransactionDT)
 	$(PY) -m fraud_detection_mlops.pipelines.retrain_flow --clock $(CLOCK)
+
+monitoring-up: ## M5: start Prometheus + Grafana (dashboards at :3000)
+	docker compose up -d prometheus grafana
+	@echo "Grafana: http://localhost:3000 (anonymous admin)  |  Prometheus: http://localhost:9090"
+
+drift-demo: ## M5: in-process decay detection + drift-triggered retrain + recovery
+	$(PY) -m fraud_detection_mlops.monitoring.demo_drift
+
+drift-monitor: ## M5: run the live drift monitor (exposes gauges for Prometheus)
+	$(PY) -m fraud_detection_mlops.monitoring.drift_monitor --interval 15
+
+produce-drift: ## M5: replay LIMIT txns injecting drift after DRIFT_AFTER messages
+	$(PY) -m fraud_detection_mlops.streaming.producer --limit $(LIMIT) --speed $(SPEED) \
+		--drift --drift-after $(or $(DRIFT_AFTER),25000)

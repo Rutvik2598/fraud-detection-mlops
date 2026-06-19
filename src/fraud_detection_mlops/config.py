@@ -200,3 +200,37 @@ FEATURE_CACHE_PARQUET: Path = Path(
 )
 # Local Prefect home (ephemeral server state); gitignored.
 os.environ.setdefault("PREFECT_HOME", str(PROJECT_ROOT / ".prefect"))
+
+# --- M5 monitoring + drift -----------------------------------------------------
+# Curated, interpretable, roughly-stationary feature set monitored for drift.
+# We deliberately exclude the cumulative velocity features (lifetime counts/sums)
+# because they trend upward over time by construction — they would always "drift"
+# train-vs-later and drown out real signal. Ratios, rates, recent-window counts,
+# the amount, and stable categoricals make a clean baseline (healthy ~10% drift,
+# well under DRIFT_SHARE_THRESHOLD) so injected drift stands out.
+DRIFT_NUMERIC_FEATURES: tuple[str, ...] = (
+    AMOUNT_COL,
+    "amt_vs_card_mean_ratio",
+    "time_since_last_txn",
+    "card_txn_count_24h",
+    "new_location",
+    "new_device",
+)
+DRIFT_CATEGORICAL_FEATURES: tuple[str, ...] = ("ProductCD", "card4", "card6", "DeviceType")
+
+# Dataset drift is declared when at least this share of monitored features drift
+# (Evidently picks the per-column test). Prediction drift is its own signal.
+DRIFT_SHARE_THRESHOLD: float = float(os.environ.get("DRIFT_SHARE_THRESHOLD", "0.3"))
+# Rows sampled for the reference (training) and current windows in a drift check.
+DRIFT_WINDOW_SIZE: int = int(os.environ.get("DRIFT_WINDOW_SIZE", "5000"))
+DRIFT_REPORT_DIR: Path = REPORTS_DIR / "drift"
+
+# Synthetic covariate shift used to inject drift (producer --drift / the demo):
+# blow up the amount and the velocity-derived signals so the population moves out
+# of the training support — the model decays and drift detectors fire.
+DRIFT_AMOUNT_MULTIPLIER: float = float(os.environ.get("DRIFT_AMOUNT_MULTIPLIER", "5.0"))
+DRIFT_AMOUNT_SHIFT: float = float(os.environ.get("DRIFT_AMOUNT_SHIFT", "200.0"))
+
+# Prometheus: the drift monitor exposes its gauges on this port; Prometheus
+# scrapes both it and the scoring service (SERVING_PORT).
+MONITORING_PORT: int = int(os.environ.get("MONITORING_PORT", "8003"))

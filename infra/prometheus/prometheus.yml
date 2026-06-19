@@ -1,0 +1,14 @@
+# Prometheus scrape config (M5). Targets run on the host (venv), not in compose,
+# so we scrape host.docker.internal. The scoring service exposes /metrics on
+# SERVING_PORT (8001); the drift monitor on MONITORING_PORT (8003).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: fraud-scoring
+    static_configs:
+      - targets: ["host.docker.internal:8001"]
+  - job_name: fraud-drift-monitor
+    static_configs:
+      - targets: ["host.docker.internal:8003"]

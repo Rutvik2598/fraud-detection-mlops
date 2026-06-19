@@ -2,7 +2,7 @@
 
 Real-time fraud detection MLOps pipeline on the IEEE-CIS dataset — streaming inference, train/serve feature parity, a delayed-label feedback loop, and drift-triggered retraining.
 
-**Status:** M0 — scaffold ✅ · M1 — offline model ✅ · M2 — streaming ✅ · M3 — feature store + serving ✅ · M4 — feedback loop + retraining ✅ · _next: M5 (monitoring + drift)_
+**Status:** M0 — scaffold ✅ · M1 — offline model ✅ · M2 — streaming ✅ · M3 — feature store + serving ✅ · M4 — feedback loop ✅ · M5 — monitoring + drift-triggered retrain ✅ · _next: M6 (stretch)_
 
 ## Quickstart
 
@@ -99,3 +99,26 @@ Demo output (3 rounds, label delay 7 days; validation window held out every roun
 | 3 | 12,192,853 | 453,779 | 0.4529 | 0.4352 | ✅ |
 
 PR-AUC climbs as delayed labels mature, each round gated-promoted because it genuinely beat the incumbent (the gate rejects regressions — covered by `tests/test_feedback.py`). The demo then traces one late fraud label from "not yet arrived → excluded" to "matured → joined back → trained on → part of a promoted model." Point-in-time features are computed once and cached; the retraining flow only uses labels matured by the clock (never the future — invariant 1/2). The demo registers under a separate model name (`fraud-detection-feedback`) so it never disturbs the M3 serving champion.
+
+## M5 — monitoring + drift-triggered retrain
+
+Evidently drift reports (feature + prediction drift vs. the training distribution), Prometheus metrics on the scoring service + drift monitor, Grafana dashboards, and a drift-check Prefect flow that fires the M4 retraining flow when the world moves.
+
+```bash
+docker compose up -d prometheus grafana          # Grafana :3000 (anon admin), Prometheus :9090
+make drift-demo                                  # in-process: decay detection -> drift-triggered retrain -> recovery
+# live version:
+make serve                                       # scoring service exposes /metrics
+make drift-monitor                               # publishes drift gauges; triggers retrain on drift
+make produce-drift LIMIT=60000 DRIFT_AFTER=25000 # stream a covariate shift mid-run
+```
+
+`make drift-demo` output (decay → detect → trigger → recover):
+
+| state | feature drift share | dataset drift | prediction drift | PR-AUC |
+|---|---|---|---|---|
+| 1. healthy | 0.10 | False | False | 0.4751 |
+| 2. drift injected (champion) | 0.30 | **True** | **True** | 0.4447 |
+| 4. after retrain (new model) | 0.10 | False | False | 0.4516 |
+
+Healthy traffic raises no alert; an injected covariate shift trips feature **and** prediction drift and the champion decays; the drift-check flow detects it and fires the retraining flow; the retrained model brings drift back to healthy and recovers PR-AUC on the drifted population. Drift detection needs **no labels** (the early-warning signal, since chargebacks arrive late). Monitored features are deliberately the roughly-stationary ones — cumulative velocity counts trend over time and would always "drift." Grafana panels: latency p50/p99, throughput, alert (block) rate, score distribution, feature/prediction drift, drift-triggered retrains. Evidently HTML reports land in `reports/drift/`.

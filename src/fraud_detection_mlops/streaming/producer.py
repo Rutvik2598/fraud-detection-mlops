@@ -56,8 +56,16 @@ def replay(
     speed: float,
     max_sleep: float,
     log_every: int,
+    drift: bool = False,
+    drift_after: int = 0,
 ) -> int:
-    """Stream transactions to ``topic``; return the number of messages produced."""
+    """Stream transactions to ``topic``; return the number of messages produced.
+
+    With ``drift=True``, transactions sent after ``drift_after`` messages have their
+    amount perturbed (scaled + shifted) to inject a covariate shift — the M5 decay
+    scenario. Downstream the velocity features recompute from the shifted amounts,
+    so the drift propagates exactly as a real population change would.
+    """
     df = load_training_data()
     df = df.sort_values([config.TIME_COL, config.ID_COL]).reset_index(drop=True)
     if limit is not None:
@@ -84,12 +92,18 @@ def replay(
         prev_dt = dt
 
         message = {k: _clean(v) for k, v in rec.items()}
+        if drift and n >= drift_after and message.get(config.AMOUNT_COL) is not None:
+            message[config.AMOUNT_COL] = (
+                message[config.AMOUNT_COL] * config.DRIFT_AMOUNT_MULTIPLIER
+                + config.DRIFT_AMOUNT_SHIFT
+            )
         key = card_key(rec)
         producer.produce(topic, key=key, value=json.dumps(message), on_delivery=_delivery_report)
         producer.poll(0)  # serve delivery callbacks without blocking
         n += 1
         if n % log_every == 0:
-            logger.info("Produced %d (sim TransactionDT=%d)", n, int(dt))
+            tag = " [DRIFT]" if drift and n >= drift_after else ""
+            logger.info("Produced %d (sim TransactionDT=%d)%s", n, int(dt), tag)
 
     producer.flush()
     elapsed = time.time() - t_start
@@ -108,6 +122,8 @@ def main() -> None:
                    help="Simulated TransactionDT-seconds per real second; 0 = as fast as possible.")
     p.add_argument("--max-sleep", type=float, default=config.REPLAY_MAX_SLEEP_SECONDS)
     p.add_argument("--log-every", type=int, default=5000)
+    p.add_argument("--drift", action="store_true", help="Inject a covariate shift (M5 decay).")
+    p.add_argument("--drift-after", type=int, default=0, help="Start drifting after N messages.")
     args = p.parse_args()
     replay(
         bootstrap=args.bootstrap,
@@ -116,6 +132,8 @@ def main() -> None:
         speed=args.speed,
         max_sleep=args.max_sleep,
         log_every=args.log_every,
+        drift=args.drift,
+        drift_after=args.drift_after,
     )
 
 

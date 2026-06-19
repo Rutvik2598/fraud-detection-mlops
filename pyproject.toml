@@ -24,6 +24,8 @@ license = { text = "MIT" }
 #   - fastapi/uvicorn: the M3 online scoring service. Pinned <0.130 because
 #     Prefect 3's embedded server (M4) breaks on FastAPI's 0.137 router API.
 #   - prefect: the M4 retraining orchestration.
+#   - evidently: M5 feature + prediction drift reports.
+#   - prometheus-client: M5 serving + drift metrics for Prometheus/Grafana.
 dependencies = [
     "pandas>=2.2",
     "numpy>=2.0",
@@ -37,6 +39,8 @@ dependencies = [
     "uvicorn>=0.30",
     "requests>=2.31",
     "prefect>=3.0,<4",
+    "evidently>=0.7",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
