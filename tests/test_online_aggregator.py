@@ -87,7 +87,7 @@ def test_online_known_values(timeline):
     assert math.isnan(online.loc[4, "new_device"])  # device missing -> unknown
 
 
-def test_concurrent_same_second_transactions(timeline):
+def test_concurrent_same_second_transactions():
     # Two txns of the same card at the SAME TransactionDT: the windows must
     # exclude the concurrent sibling (closed="left"), but the later-id one still
     # counts the earlier as a prior txn (lifetime/prev/seen). This is the most

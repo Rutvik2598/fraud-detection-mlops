@@ -19,7 +19,7 @@ from fraud_detection_mlops.pipelines.promote import should_promote
 DT, TID, TARGET = config.TIME_COL, config.ID_COL, config.TARGET
 
 
-def _features(n: int = 100, delay: int = 1000) -> pd.DataFrame:
+def _features(n: int = 100) -> pd.DataFrame:
     # Evenly spaced transactions over a timeline; a dummy feature column.
     rng = np.random.default_rng(0)
     dt = np.arange(n) * 100  # 0,100,...,(n-1)*100
@@ -55,7 +55,7 @@ def test_label_store_available_dt():
 
 
 def test_build_training_data_no_future_label_leak():
-    feats = _features(n=200, delay=1000)
+    feats = _features(n=200)
     delay, val_fraction, mtf = 1000, 0.2, 0.7
     clock = 12000
     out = labels.build_training_data(

@@ -1,124 +1,174 @@
-# fraud-detection-mlops
+# Real-time fraud detection — end-to-end MLOps
 
-Real-time fraud detection MLOps pipeline on the IEEE-CIS dataset — streaming inference, train/serve feature parity, a delayed-label feedback loop, and drift-triggered retraining.
+A production-shaped credit-card fraud detection system, not just a model in a notebook. It scores transactions inline with authorization (sub-50 ms), learns from chargeback labels that only arrive weeks later, watches itself for decay, and retrains automatically when the data drifts. Built on the [IEEE-CIS Fraud Detection](https://www.kaggle.com/c/ieee-fraud-detection) dataset (~590k transactions, 3.5% fraud).
 
-**Status:** M0 — scaffold ✅ · M1 — offline model ✅ · M2 — streaming ✅ · M3 — feature store + serving ✅ · M4 — feedback loop ✅ · M5 — monitoring + drift-triggered retrain ✅ · _next: M6 (stretch)_
+The interesting engineering here is the **loop around the model**: streaming feature computation that exactly matches training, a feature store for low-latency lookups, a delayed-label feedback path, and drift-triggered retraining.
 
-## Quickstart
+## The problem
 
-```bash
-python -m venv .venv && .venv\Scripts\activate   # source .venv/bin/activate on Unix
-pip install -e ".[dev]"
-cp .env.example .env
+Fraud detection has two properties that make it a systems problem, not a modelling exercise:
 
-python -m fraud_detection_mlops.models.train_baseline   # M0: train + log baseline
-python -m fraud_detection_mlops.models.train_offline    # M1: XGBoost + calibration + cost threshold
-pytest -q                                               # leakage / encoder tests
-mlflow ui --backend-store-uri sqlite:///mlflow.db       # view runs at :5000
+1. **You must decide now, but learn the truth later.** A card is swiped; you have milliseconds to allow or block. Whether it was actually fraud is only known weeks later, when the customer disputes the charge (a chargeback).
+2. **The world drifts.** Fraud patterns, products, and spending all change, so a model that was accurate last month quietly gets worse — with no error, no crash.
+
+The system is built as two planes connected by a feedback loop:
+
+```
+                 ONLINE PLANE  (fast, every transaction)
+   transaction ─► look up features (Redis) ─► calibrated score ─► allow / block
+        │                                            │  (<50 ms)
+        │                                            ▼
+        │                                   Prometheus / Grafana
+        ▼                                   (latency, drift, alerts)
+   ┌─────────────────────────── feedback loop ───────────────────────────┐
+   │  chargeback labels arrive late ─► retrain ─► promote if better       │
+   │            ▲                                                          │
+   │            └──── triggered when drift is detected ◄──────────────────┘
+                 OFFLINE PLANE  (slow, occasional)
 ```
 
-EDA lives in [notebooks/00_eda.ipynb](notebooks/00_eda.ipynb).
+## Results
 
-## Data
+All metrics use a **time-based split** (train on the past, validate on the most recent ~20% by transaction time) — the realistic setup. Random cross-validation leaks future information here and inflates scores, so it is never used. The Kaggle holdout is never touched for evaluation. Headline metric is **PR-AUC** (average precision), because at a 3.5% fraud rate accuracy is meaningless.
 
-The IEEE-CIS dataset is **not committed** (`dataset/` is gitignored). Download from Kaggle into `dataset/`:
-
-```bash
-kaggle competitions download -c ieee-fraud-detection -p dataset/ && unzip dataset/'*.zip' -d dataset/
-```
-
-Only `train_transaction.csv` (+ `train_identity.csv`) is used for modeling; the test files are the unlabeled holdout, reserved for later stream replay.
-
-## M0 result
-
-Time-based validation (latest ~20% by `TransactionDT`): fraud rate **3.44%**, **PR-AUC 0.184** (5.3× over base), ROC-AUC 0.832. A deliberately simple, class-weighted logistic-regression floor for later milestones to beat.
-
-## M1 result
-
-XGBoost on point-in-time velocity features (per-card trailing-window counts/sums, time-since-last, amount-vs-card-mean, new-device/new-location flags) + frequency-encoded categoricals, with `scale_pos_weight` for imbalance, isotonic calibration, and a cost-minimizing block threshold. Evaluated on the **same** validation window as M0.
-
-| metric | M0 (LogReg) | M1 (XGBoost) |
+| Metric | Baseline (logistic regression) | Gradient-boosted model |
 | --- | --- | --- |
-| PR-AUC (headline) | 0.184 | **0.475** (+158%) |
+| PR-AUC | 0.184 | **0.475** |
 | ROC-AUC | 0.832 | 0.891 |
-| precision@500 | 0.034 | 0.916 |
-| Brier (calibrated) | — | 0.083 → **0.023** |
+| Precision @ top 500 alerts | 0.034 | **0.916** |
+| Brier score (calibration) | — | 0.083 → **0.023** after calibration |
 
-The cost model (missed fraud = txn amount; false block = \$25) selects its threshold on a held-out calibration slice, then is applied to validation: expected cost **\$404k** vs **\$610k** for blocking nothing (~34% lower) and \$2.85M for blocking everything. The calibrated model is logged to MLflow and registered as `fraud-detection-offline@champion`. Point-in-time correctness is covered by `tests/`.
+The model outputs **calibrated probabilities**, and the allow/block threshold is chosen by **expected cost** (a missed fraud costs the transaction amount; a wrongly blocked customer costs a fixed amount), not a default 0.5. At the cost-optimal threshold, expected loss on the validation window is **~34% lower than blocking nothing** and a fraction of blocking everything.
 
-## M2 — streaming backbone
+Operationally the model is strong where it matters — **92% of the top-500 flagged transactions are truly fraud** — even though PR-AUC (which also grades the hard high-recall tail) leaves clear headroom. See [Limitations](#limitations--next-steps).
 
-Redpanda (Kafka API) via `docker-compose`, a **producer** that replays transactions in `TransactionDT` order at configurable speed, and a **consumer** that keeps the per-card rolling aggregates current as transactions flow. No scoring yet (that's M3).
+**Serving latency** (warm, server-side): **p50 ≈ 14 ms, p99 ≈ 28 ms**, within the 50 ms budget — a Redis feature lookup (~1.4 ms) plus model inference (~13 ms).
 
-```bash
-docker compose up -d                 # start Redpanda + Console (http://localhost:8080)
-make topic                           # create the `transactions` topic (6 partitions)
+## What makes it production-grade
 
-# end-to-end check: replay a slice, consume it, verify streamed aggregates == offline
-python -m fraud_detection_mlops.streaming.verify --limit 50000
+- **No data leakage.** Every behavioural feature ("card's spend in the last 24h", "time since last transaction", "size of the card's fraud-ring") is computed from *strictly earlier* transactions only. This is enforced mechanically and covered by tests that assert a future transaction can never change a past one's features.
+- **Train/serve parity.** The rolling features are defined **once** and reused by offline training and online serving. A test replays 30k real transactions through both paths and asserts the features — and the resulting model scores — are identical. Two code paths that "should match" are a bug waiting to happen.
+- **Honest evaluation.** Time-based split, PR-AUC over accuracy, calibrated probabilities, cost-based thresholds, and the unlabelled holdout left untouched.
+- **A real feedback loop.** Labels are treated as arriving late; retraining only ever uses labels that have matured, and a new model is promoted **only if it beats the current one** on a fixed held-out window.
+- **Self-monitoring.** Feature and prediction drift are tracked against the training distribution (no labels required), surfaced on Grafana, and wired to trigger retraining automatically.
+- **Reproducible.** Pinned dependencies, deterministic seeds, and a single `docker compose up` for the infrastructure.
 
-# or run the two sides separately
-make produce LIMIT=50000 SPEED=0     # SPEED = sim TransactionDT-seconds per real second (0 = flood)
-make consume                         # updates rolling features, writes reports/stream_features.jsonl
+## Tech stack
+
+| Concern | Choice |
+| --- | --- |
+| Model | XGBoost (gradient-boosted trees) + isotonic calibration |
+| Streaming | Redpanda (Kafka API) |
+| Feature store | Feast — online: Redis, offline: parquet |
+| Serving | FastAPI + Uvicorn |
+| Experiment tracking & registry | MLflow |
+| Orchestration | Prefect |
+| Monitoring | Evidently (drift) + Prometheus + Grafana |
+| Packaging | Python 3.11+, `uv`, Docker Compose |
+
+## Repository layout
+
+```
+src/fraud_detection_mlops/
+├── config.py          # paths, seeds, thresholds, window sizes — one place, no magic numbers
+├── data/              # loading, validation, time-based splits
+├── features/          # feature definitions shared by training and serving
+│   ├── velocity.py    #   per-card rolling aggregates (batch)
+│   ├── online.py      #   the same definitions, computed incrementally for serving
+│   ├── graph.py       #   fraud-ring graph features (connected components)
+│   ├── encoders.py    #   leakage-safe frequency encoding
+│   └── build.py       #   model feature-matrix assembly
+├── models/            # train, evaluate, calibrate, cost-based threshold
+├── streaming/         # Kafka producer (replay) + consumer (rolling features)
+├── serving/           # Feast feature views + FastAPI scoring service
+├── monitoring/        # Evidently drift + Prometheus metrics
+└── pipelines/         # Prefect flows: delayed-label retraining, drift-check
+tests/                 # leakage, parity, drift, and gating tests
+infra/                 # Prometheus + Grafana provisioning
 ```
 
-Messages are **keyed by card** so all of a card's transactions stay ordered on one partition — the guarantee the rolling aggregates depend on. The online aggregator (`features/online.py`) is the serve-side twin of the offline `features/velocity.py`; `tests/test_online_aggregator.py` replays data through both and asserts they produce **identical** features (incl. a 30k-row real-data slice and concurrent same-second transactions) — train/serve parity (invariant 5) verified without a broker. The transactions stream deliberately carries **no fraud label** (chargebacks arrive late; that's the M4 feedback loop).
+## Getting started
 
-## M3 — feature store + online inference
-
-Feast (online = Redis, offline = parquet) serves the per-card rolling state; a FastAPI service looks features up by card key and scores with the calibrated champion model under the latency budget. The 12 velocity features are defined **once** (`features/online.py::compute_velocity_features`) and exposed as a Feast on-demand feature view — the same function the streaming aggregator uses, so offline (`get_historical_features`) and online (`get_online_features`) cannot drift.
+### 1. Install
 
 ```bash
-docker compose up -d redis                              # online store
-make feast-build                                        # build snapshot + apply + materialize
-make serve                                              # FastAPI on :8001 (4 workers)
-make score-verify                                       # prove parity: online features + scores == offline
-make loadtest                                           # p50/p99 latency under load
+uv venv --python 3.13 .venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+cp .env.example .env
 ```
-For local dev without Docker, set `FEAST_ONLINE_STORE=sqlite`.
 
-**Train/serve parity:** `make score-verify` materializes state at the cutoff, then for the first "live" transaction of each card compares online vs offline — **300 transactions, all 12 velocity features and all calibrated model scores matched exactly**. `tests/test_serving_parity.py` guards the Feast on-demand transform without a broker.
+### 2. Get the data
 
-**Latency (server-side processing, the scoring budget):** warm per-request **p50 ≈ 14 ms, p99 ≈ 28 ms** — under the 50 ms budget (Feast lookup ~1.4 ms, model ~13 ms). Under concurrent load the single-worker GIL serializes the CPU-bound model call, so throughput scales with workers/replicas; the sqlite dev store also adds tail latency under contention that Redis removes. Measured with `make loadtest`; re-run against Redis for production numbers.
-
-## M4 — feedback loop + retraining
-
-Labels (chargebacks) arrive **late**: a transaction at `TransactionDT = t` only gets a usable label once the clock passes `t + LABEL_DELAY_SECONDS`. A Prefect flow retrains on the matured labels (joined back by `TransactionID`) and promotes the challenger in the MLflow registry **only if it beats the current champion** on the fixed held-out validation window.
+The dataset is not committed (`dataset/` is gitignored). Download from Kaggle into `dataset/`:
 
 ```bash
-make feedback-demo                 # simulate the clock advancing: retrain rounds + gated promotion + label trace
-make retrain CLOCK=8745782         # run one Prefect retraining round at a given clock
+kaggle competitions download -c ieee-fraud-detection -p dataset/ && unzip 'dataset/*.zip' -d dataset/
 ```
 
-Demo output (3 rounds, label delay 7 days; validation window held out every round):
+Only `train_transaction.csv` + `train_identity.csv` (the labelled data) are used for modelling. The test files are the unlabelled holdout, used only as a source of unseen transactions to replay through the stream.
 
-| round | clock (TransactionDT) | matured labels | challenger PR-AUC | champion PR-AUC | promoted |
-|---|---|---|---|---|---|
-| 1 | 5,592,303 | 214,078 | 0.4103 | — | ✅ |
-| 2 | 8,745,782 | 331,489 | 0.4352 | 0.4103 | ✅ |
-| 3 | 12,192,853 | 453,779 | 0.4529 | 0.4352 | ✅ |
-
-PR-AUC climbs as delayed labels mature, each round gated-promoted because it genuinely beat the incumbent (the gate rejects regressions — covered by `tests/test_feedback.py`). The demo then traces one late fraud label from "not yet arrived → excluded" to "matured → joined back → trained on → part of a promoted model." Point-in-time features are computed once and cached; the retraining flow only uses labels matured by the clock (never the future — invariant 1/2). The demo registers under a separate model name (`fraud-detection-feedback`) so it never disturbs the M3 serving champion.
-
-## M5 — monitoring + drift-triggered retrain
-
-Evidently drift reports (feature + prediction drift vs. the training distribution), Prometheus metrics on the scoring service + drift monitor, Grafana dashboards, and a drift-check Prefect flow that fires the M4 retraining flow when the world moves.
+### 3. Train the model
 
 ```bash
-docker compose up -d prometheus grafana          # Grafana :3000 (anon admin), Prometheus :9090
-make drift-demo                                  # in-process: decay detection -> drift-triggered retrain -> recovery
-# live version:
-make serve                                       # scoring service exposes /metrics
-make drift-monitor                               # publishes drift gauges; triggers retrain on drift
-make produce-drift LIMIT=60000 DRIFT_AFTER=25000 # stream a covariate shift mid-run
+make train-offline        # feature engineering, calibration, cost threshold; registers the model in MLflow
+mlflow ui --backend-store-uri sqlite:///mlflow.db   # inspect runs and the model registry at :5000
 ```
 
-`make drift-demo` output (decay → detect → trigger → recover):
+### 4. Run the live system
 
-| state | feature drift share | dataset drift | prediction drift | PR-AUC |
-|---|---|---|---|---|
-| 1. healthy | 0.10 | False | False | 0.4751 |
-| 2. drift injected (champion) | 0.30 | **True** | **True** | 0.4447 |
-| 4. after retrain (new model) | 0.10 | False | False | 0.4516 |
+```bash
+docker compose up -d      # Redpanda + Console, Redis, Prometheus, Grafana
+make feast-build          # build per-card state and load it into the online store
+make topic                # create the transactions stream
 
-Healthy traffic raises no alert; an injected covariate shift trips feature **and** prediction drift and the champion decays; the drift-check flow detects it and fires the retraining flow; the retrained model brings drift back to healthy and recovers PR-AUC on the drifted population. Drift detection needs **no labels** (the early-warning signal, since chargebacks arrive late). Monitored features are deliberately the roughly-stationary ones — cumulative velocity counts trend over time and would always "drift." Grafana panels: latency p50/p99, throughput, alert (block) rate, score distribution, feature/prediction drift, drift-triggered retrains. Evidently HTML reports land in `reports/drift/`.
+# in separate terminals:
+make serve                # scoring API on :8001 (exposes /metrics)
+make consume              # keep rolling features fresh from the stream
+make produce              # replay transactions onto the stream
+make drift-monitor        # detect drift, publish gauges, trigger retraining
+```
+
+Dashboards: **Grafana** at `:3000`, **Redpanda Console** at `:8080`, **Prometheus** at `:9090`.
+
+### 5. Self-contained demos
+
+Each runs end-to-end and prints its result; most need only the dataset.
+
+```bash
+make score-verify     # prove online features + scores exactly match the offline definitions
+make loadtest         # measure scoring latency (p50/p99) under load
+make feedback-demo    # delayed labels → retrain rounds → gated promotion, with a label traced through
+make drift-demo       # decay detection → drift-triggered retrain → recovery
+make graph-experiment # measure the lift from fraud-ring graph features
+```
+
+`make help` lists every task.
+
+## How the pieces fit together
+
+- **Feature engineering** computes per-card velocity features (trailing-window counts and sums, time-since-last, amount-vs-average, new-device/new-location flags) and fraud-ring graph features (how many cards share a device, connected-component size). All point-in-time correct.
+- **Streaming** replays transactions in time order onto Redpanda, keyed by card so each card's events stay ordered. A consumer maintains the rolling state incrementally — the same logic the batch path uses.
+- **Feature store + serving** materialise per-card state into Redis; FastAPI looks features up by card key and scores with the calibrated model. The velocity transform is a single function exposed as a Feast on-demand view, so offline and online cannot diverge.
+- **Feedback loop** simulates chargebacks arriving after a delay, joins matured labels back to their transactions, and runs a Prefect retraining flow that promotes a challenger only if it beats the champion on the held-out window.
+- **Monitoring** compares recent traffic to the training distribution with Evidently, exports serving and drift metrics to Prometheus/Grafana, and trips the retraining flow when drift is detected.
+
+## Testing
+
+```bash
+pytest -q
+```
+
+The suite focuses on the things that are easy to get silently wrong:
+
+- **Leakage** — future transactions never change a past transaction's features (velocity and graph).
+- **Train/serve parity** — the incremental online features equal the batch offline features, including a real-data slice and concurrent same-second transactions.
+- **Feedback correctness** — retraining never uses an unmatured label, and the validation window is fixed across rounds.
+- **Promotion gating** — a challenger is promoted only when it actually beats the champion.
+- **Drift** — clean traffic raises no alarm; an injected shift is detected.
+
+## Limitations & next steps
+
+- **Model accuracy has headroom.** PR-AUC ~0.48 on the honest time split is solid at the top of the ranking but not state-of-the-art. The biggest untapped levers are a stable client identifier with per-client aggregations, and hyperparameter tuning — both target the bulk of the ranking. (This was a deliberate scope choice: the project's focus is the production system, not leaderboard chasing.)
+- **Graph features are coverage-limited.** They add a real but small lift because device information exists for only ~24% of transactions.
+- **Online serving of graph features** is not yet wired into the feature store — the same path the velocity features already took from batch to online.
+- **Single-node infrastructure.** Everything runs locally via Docker Compose; a cloud deployment (k8s, managed Kafka/Redis) is out of scope here.

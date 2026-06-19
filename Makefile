@@ -14,7 +14,8 @@ PORT ?= 8001
         redpanda-up redpanda-down redpanda-logs topic produce consume stream-demo \
         store-up feast-build serve score-verify loadtest \
         feedback-demo retrain \
-        monitoring-up drift-demo drift-monitor produce-drift
+        monitoring-up drift-demo drift-monitor produce-drift \
+        graph-experiment
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -96,3 +97,6 @@ drift-monitor: ## M5: run the live drift monitor (exposes gauges for Prometheus)
 produce-drift: ## M5: replay LIMIT txns injecting drift after DRIFT_AFTER messages
 	$(PY) -m fraud_detection_mlops.streaming.producer --limit $(LIMIT) --speed $(SPEED) \
 		--drift --drift-after $(or $(DRIFT_AFTER),25000)
+
+graph-experiment: ## M6: fraud-ring graph features — before/after PR-AUC on the honest split
+	$(PY) -m fraud_detection_mlops.pipelines.graph_experiment
